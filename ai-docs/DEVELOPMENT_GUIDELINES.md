@@ -82,17 +82,14 @@ We build with AI coding assistants as a core part of the workflow. This means:
 
 | Database | Use Case |
 |---|---|
-| **PostgreSQL** | Primary relational database for structured, transactional data |
-| **MongoDB** | Document store for flexible schemas and document-oriented workloads |
-| **DynamoDB** | Serverless and key-value workloads |
+| **MongoDB** | Primary database for this POC — flexible schemas, fast iteration |
 | **Redis** | Caching, session management, pub/sub |
 
-### ORMs and Drivers
+### ODM
 
 | Database | Approved Tool |
 |---|---|
-| PostgreSQL | **Drizzle ORM** (the only approved ORM — no alternatives) |
-| MongoDB | **Native MongoDB driver** (default) or **Mongoose** (when it adds clear value) |
+| MongoDB | **Mongoose** |
 
 ### Frontend
 
@@ -348,122 +345,100 @@ src/
 
 ## Database Conventions
 
-This section covers PostgreSQL conventions in detail. For MongoDB and DynamoDB, the key rules are: store dates as epoch values (milliseconds since January 1, 1970 UTC), use UIDs instead of exposing numeric IDs, and follow the entity design rules below.
+This POC uses MongoDB with Mongoose. A future rebuild may move to PostgreSQL, so conventions are designed to be portable where practical.
 
 ### Core Principles
 
-- No composite primary keys — every table uses a single primary key
-- Soft deletes only — never hard delete records; use a timestamp for logical deletion
-- No nullable dates — use a "zero date" instead of NULL (explained below)
-- Never expose numeric primary keys publicly — use UIDs
-- All VARCHAR fields must specify a length
-- No DEFAULT clauses except for primary key auto-increment
+- Soft deletes only — never hard delete documents; use a `deletedAt` timestamp for logical deletion
+- Never expose MongoDB `_id` values publicly — use UIDs
+- Store dates as epoch values (milliseconds since January 1, 1970 UTC) for portability
 
-### Table Types
+### Collection Types
 
-| Type | Purpose | Primary Key |
+| Type | Purpose | Notes |
 |---|---|---|
-| **Type tables** | Lookups, enums, classifications | CHAR(1-3) or SMALLINT |
-| **Entity tables** | Core business data (users, orders) | INTEGER or BIGINT (auto-increment) |
-| **Association tables** | Many-to-many relationships | INTEGER (auto-increment) |
+| **Type collections** | Lookups, enums, classifications | Small, relatively static documents |
+| **Entity collections** | Core business data (users, boards, ideas) | Main application documents |
 
-### Type Tables
+### Type Collections
 
-Type tables store lookup values (like dropdown options). Required fields:
+Type collections store lookup values (like dropdown options). Required fields:
 
 | Field | Description |
 |---|---|
-| `id` | CHAR(1-3) or SMALLINT primary key |
-| `name` | VARCHAR — human-readable display name |
-| `enum_name` | VARCHAR — UPPERCASE_SNAKE_CASE code identifier |
+| `code` | Short string identifier (1-3 chars), unique |
+| `name` | Human-readable display name |
+| `enumName` | UPPERCASE_SNAKE_CASE code identifier |
 
-Type tables can be hierarchical (up to 3 levels deep). Child IDs build on parent IDs:
+Type collections can be hierarchical (up to 3 levels deep). Child codes build on parent codes:
 
-| Level | ID Length | Example |
+| Level | Code Length | Example |
 |---|---|---|
-| Root | CHAR(1) | `P` |
-| Child | CHAR(2) | `P1` |
-| Grandchild | CHAR(3) | `P1A` |
+| Root | 1 char | `P` |
+| Child | 2 chars | `P1` |
+| Grandchild | 3 chars | `P1A` |
 
 If you need more than 3 levels, reconsider your design.
 
 ### UID Fields
 
-UIDs are the public-facing identifiers for entities. They appear in URLs, API responses, and frontends. Never send a numeric primary key to the outside world.
+UIDs are the public-facing identifiers for entities. They appear in URLs, API responses, and frontends. Never send a MongoDB `_id` to the outside world.
 
 | Property | Value |
 |---|---|
 | Format | v4 UUID with hyphens removed, uppercased |
-| Data type | CHAR(32) (not VARCHAR) |
-| Constraint | UNIQUE |
+| Length | 32 characters |
+| Constraint | Unique index |
 | Example | `A1B2C3D4E5F64A7B8C9D0E1F2A3B4C5D` |
 
 Use UIDs whenever an entity appears in a public UI, API endpoint, URL, or is transmitted over the internet.
 
 ### Date and Time
 
-**PostgreSQL:** Use `TIMESTAMPTZ` (timestamp with time zone) for all date fields.
+Store all dates as **epoch milliseconds** (Number type). This keeps date handling consistent, avoids timezone ambiguity, and makes the data portable to any future database.
 
-**Zero date:** Instead of `NULL`, use `1700-01-01 00:00:00+00` to mean "not set." This is because PostgreSQL allows multiple NULL values in a column with a unique constraint, which can cause bugs. Zero dates ensure unique constraints work consistently.
+Use `0` (zero) to mean "not set" instead of `null`. This avoids issues with unique indexes that treat multiple `null` values as distinct.
 
 ### Audit Fields
 
-Not every table needs all audit fields. Use what's appropriate:
+Not every collection needs all audit fields. Use what's appropriate:
 
 **Timestamp fields:**
 
-| Field | Abbreviated | Type | Purpose |
-|---|---|---|---|
-| `created_at` | `ac` | TIMESTAMPTZ NOT NULL | When the record was created |
-| `updated_at` | `av` | TIMESTAMPTZ NOT NULL | When last updated (zero date initially) |
-| `deleted_at` | `ad` | TIMESTAMPTZ NOT NULL | When soft deleted (zero date initially) |
+| Field | Type | Purpose |
+|---|---|---|
+| `createdAt` | Number (epoch ms) | When the document was created |
+| `updatedAt` | Number (epoch ms) | When last updated (0 initially) |
+| `deletedAt` | Number (epoch ms) | When soft deleted (0 initially) |
 
 **User tracking fields:**
 
-| Field | Abbreviated | Purpose |
-|---|---|---|
-| `created_by` | `au` | User who created the record |
-| `updated_by` | `au` | User who last updated it |
-| `deleted_by` | `au` | User who deleted it |
-
-Choose either full names or abbreviated names for your project and stick with one consistently.
-
-**Typical usage by table type:**
-
-| Table Type | Typical Audit Fields |
+| Field | Purpose |
 |---|---|
-| Immutable log entries | `created_at` only |
-| Configuration records | `created_at`, `updated_at` |
+| `createdBy` | UID of user who created the document |
+| `updatedBy` | UID of user who last updated it |
+| `deletedBy` | UID of user who deleted it |
+
+**Typical usage by collection type:**
+
+| Collection Type | Typical Audit Fields |
+|---|---|
+| Immutable log entries | `createdAt` only |
+| Configuration documents | `createdAt`, `updatedAt` |
 | User-managed entities | All timestamp and user fields |
-| Association tables | `created_at`, `deleted_at` minimum |
 
 ### Data Population Responsibility
 
-The **database** is only responsible for generating auto-increment primary keys.
+MongoDB auto-generates `_id` values. **Your application code** (the data logic layer) is responsible for populating everything else: UIDs, audit timestamps, user tracking fields, and all business fields. Do not rely on Mongoose defaults for these — set them explicitly in the repository layer.
 
-**Your application code** (the data logic layer) is responsible for populating everything else: UIDs, audit timestamps, user tracking fields, and all business fields. Do not use database DEFAULT clauses for these.
+This keeps logic visible, testable, and portable.
 
-This makes your code portable across database engines and testable without a running database.
-
-### VARCHAR Length Guidelines
-
-| Field Type | Suggested Length |
-|---|---|
-| Name fields | 50–100 |
-| Email addresses | 255 |
-| Short descriptions | 255–500 |
-| URLs | 2048 |
-| Phone numbers | 20 |
-| Enum-style codes | 50 |
-
-### Constraint Naming
+### Index Naming
 
 | Type | Pattern | Example |
 |---|---|---|
-| Primary Key | `pk_{table}` | `pk_users` |
-| Foreign Key | `fk_{table}_{referenced}` | `fk_orders_user` |
-| Unique | `uk_{table}_{field(s)}` | `uk_users_email` |
-| Check | `ck_{table}_{field}` | `ck_orders_amount` |
+| Unique | `uk_{collection}_{field(s)}` | `uk_users_email` |
+| Regular | `ix_{collection}_{field(s)}` | `ix_ideas_boardId` |
 
 ---
 
@@ -478,7 +453,7 @@ Application / API Layer (business logic)
 Repository Layer (validation, preparation)
         |
         v
-Data Access Layer (SQL, database connection)
+Data Access Layer (Mongoose models, database connection)
 ```
 
 ### Application / API Layer
@@ -487,36 +462,36 @@ Contains business logic and request handling. **Never accesses the database dire
 
 ### Repository Layer
 
-One repository per table. Responsibilities:
+One repository per collection. Responsibilities:
 - Validate input
 - Cleanse and sanitize data
 - Prepare objects for the data layer
 - Call data layer functions
-- Handle table-specific business rules
-- **Never constructs SQL**
+- Handle collection-specific business rules
+- **Never constructs queries directly**
 
 ### Data Access Layer
 
 The only code that touches the database. Responsibilities:
-- Construct and execute SQL queries
+- Define Mongoose schemas and models
 - Manage the database connection (never export it)
-- Automatically handle soft delete filtering (exclude deleted records by default)
+- Automatically handle soft delete filtering (exclude deleted documents by default)
 - Automatically manage audit fields
 
 The data layer exposes semantic functions like:
 
 | Function | Purpose |
 |---|---|
-| `findOne(table, criteria)` | Find a single record |
-| `findMany(table, criteria)` | Find multiple records |
-| `findById(table, id)` | Find by primary key |
-| `findByUid(table, uid)` | Find by UID |
-| `createOne(table, item, auditUser)` | Insert a record |
-| `updateOne(table, id, updates, auditUser)` | Update a record |
-| `deleteOne(table, id, auditUser)` | Soft delete a record |
-| `transaction(callback)` | Run operations in a transaction |
+| `findOne(model, criteria)` | Find a single document |
+| `findMany(model, criteria)` | Find multiple documents |
+| `findById(model, id)` | Find by internal ID |
+| `findByUid(model, uid)` | Find by UID |
+| `createOne(model, item, auditUser)` | Insert a document |
+| `updateOne(model, id, updates, auditUser)` | Update a document |
+| `deleteOne(model, id, auditUser)` | Soft delete a document |
+| `transaction(callback)` | Run operations in a session/transaction |
 
-All find operations automatically exclude soft-deleted records unless you pass `{ includeDeleted: true }`.
+All find operations automatically exclude soft-deleted documents unless you pass `{ includeDeleted: true }`.
 
 ---
 
@@ -626,7 +601,6 @@ Examples: `idb-entrance-api`, `idb-entrance-ui`, `idb-web-react`
 ### Port Assignments
 
 - Applications: 4100+
-- Database services: 5400+
 - MongoDB: 27017
 - Redis: 6379
 
@@ -662,7 +636,7 @@ Every API must be documented using the **OpenAPI specification** in YAML format.
 
 ### Database Schema Documentation
 
-If a database schema is not captured in code through an ORM, it must be documented using **JSON Schema in YAML format** covering every table, column, type, and constraint. There should never be a situation where a schema exists only in the database with no corresponding definition in the repo.
+Mongoose schemas serve as the primary schema documentation. If a collection's schema is not captured in a Mongoose model, it must be documented using **JSON Schema in YAML format** covering every field, type, and index. There should never be a situation where a schema exists only in the database with no corresponding definition in the repo.
 
 ---
 
